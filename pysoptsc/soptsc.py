@@ -4,6 +4,9 @@ scanpy object. In following with the data storage conventions, the gene expressi
 n_obvs cell IDs, the n_vars gene IDs.
 """
 
+# Import the relevant methods
+from .._probability import calculate_communication_probabilities 
+
 Class SoptSC:
     """
     Creates a SoptSC class with attributes needed to calculate the cell-cell communication probabilities using
@@ -17,8 +20,13 @@ Class SoptSC:
     gene_ids (pandas data frame)
         The gene IDs which are used to identify which parts of the gene expression data need
         to be subsetted when calculating the cell-cell communication probabilities.
+    num_genes (int)
+        The number of genes. While we could obtain num_genes from gene_ids, this is a more convenient
+        way of storing this attribute.
     cell_ids (pandas data frame)
         The cell IDs, in case one wants to annotate the resulting commmunication matrices.
+    num_cells (int)
+        The number of cells. We could obtain this from cell_ids, but this is just more convenient.
     signalling_pathways (dict)
         A dictionary of each signalling pathway we would like to consider, where the values are a list
         of (ligand, receptor) tuples that we associate with the signalling pathway.
@@ -48,8 +56,8 @@ Class SoptSC:
             These are used to adjust the communication probabilities.
             Note that these genes do not necessarily have to be specified.
         """
-        self.data = ann_data.X # Set the raw gene expression data
-        self.gene_ids = annData.var['gene_ids'] # Set the gene IDs from the annotated data matrix
+        self.data = ann_data # Set the gene expression data in the form of an annotated data frame
+        self.gene_ids = ann_data.var['gene_ids'] # Set the gene IDs from the annotated data matrix
         self.cell_ids = ann_data.obs # Set the cell IDs
         self.signalling_pathways = signalling_pathways # Set the signalling pathways we want to consider
         self.upregulated_genes = upregulated_genes # Set the upregulated target genes
@@ -103,6 +111,17 @@ Class SoptSC:
         --------
         An n_cells x n_cells sparse matrix, where n_cells is the number of cells.
         """
+
+        # Get the gene expression data
+        gene_expression_data = self.data
+
+        # Get the list of upregulated and downregulated target genes corresponding to the pair
+        upregulated_genes = get_upregulated_genes_for_ligand_receptor_pair(ligand_receptor_pair)
+        downregulated_genes = get_downregulated_genes_for_ligand_receptor_pair(ligand_receptor_pair)
+
+        # Call upon the method calculate_communication_probabilities, which calculates
+        # the probability matrix as per Wang et al. (2019)
+        return calculate_communication_probabilities(gene_expression_data, ligand_receptor_pair, upregulated_genes, downregulated_genes)
 
     def calculate_individual_probabilities_for_signalling_pathways(self, specified_pathways):
         """
