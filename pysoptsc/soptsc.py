@@ -5,9 +5,10 @@ n_obvs cell IDs, the n_vars gene IDs.
 """
 
 # Import the relevant methods
-from .._probability import calculate_communication_probabilities 
+from _probability import calculate_communication_probabilities_list, calculate_aggregated_probability_matrix, normalise_aggregated_probabilities # Methods to calculate the communication probabilities
+from _network import construct_network_from_probability_matrix, construct_network_list_from_probability_list # Methods to construct adjacency graphs
 
-Class SoptSC:
+class SoptSC:
     """
     Creates a SoptSC class with attributes needed to calculate the cell-cell communication probabilities using
     the method described in Wang et al. (2019) (https://doi.org/10.1093/nar/gkz204).
@@ -36,8 +37,22 @@ Class SoptSC:
     downregulated_genes (dict)
         The associated target genes that we assume/know to be down-regulated by a signalling pathway.
         Keys are the signalling pathway name, the values are a list of the target genes.
+    individual_probability_matrices (dict)
+        These are the individual probability matrices calculated for each ligand-receptor pair within each
+        signalling pathway. The dictionary keys are the signalling pathway names and the values are lists
+        of the probability matrices. This attribute is not initialised unless specifically called.
+    aggregated_probability_matrices (dict)
+        These are the aggregated probability matrices, calculated as the averaged probability matrix
+        over each ligand-receptor pair for a given signalling pathway.
+        The dictionary keys are the signalling pathway names and the values are the aggregated matrix.
+        This attribute is not initialised unless specifically called.
+    individual_adjacency_matrices (dict)
+        These are the adjacency matrices that correspond to the individual probabilities calculated for each
+        ligand-receptor pair within each signalling pathway. We construct these using NetworkX and take care
+        to maek sure these are 
     """
-    def __init__(self, ann_data, signalling_pathways = {}, upregulated_genes = {}, downregulated_genes = {}):
+
+    def __init__(self, ann_data, signalling_pathways = {}, ligand_receptor_pairs = [], upregulated_genes = {}, downregulated_genes = {}):
         """
         Initialise the SoptSC object.
         
@@ -56,93 +71,172 @@ Class SoptSC:
             These are used to adjust the communication probabilities.
             Note that these genes do not necessarily have to be specified.
         """
-        self.data = ann_data # Set the gene expression data in the form of an annotated data frame
-        self.gene_ids = ann_data.var['gene_ids'] # Set the gene IDs from the annotated data matrix
-        self.cell_ids = ann_data.obs # Set the cell IDs
-        self.signalling_pathways = signalling_pathways # Set the signalling pathways we want to consider
-        self.upregulated_genes = upregulated_genes # Set the upregulated target genes
-        self.downregulated_genes = downregulated_genes # Set the downregulated target genes
 
-    def set_signalling_pathways(self, signalling_pathways):
+        self.data = ann_data # Set the gene expression data in the form of an annotated data frame
+        self.gene_ids = ann_data.var_names # Set the gene IDs from the annotated data matrix
+        self.cell_ids = ann_data.obs # Set the cell IDs
+        self.signalling_pathways = {} # Initialise the signalling pathways dictionary
+        self.upregulated_genes = {} # Initialise the upregulated genes
+        self.downregulated_genes = {} # Initialise the downregulated genes
+
+        num_pathways = len(signalling_pathways)
+
+        # Store the ligand receptor pairs with their corresponding pathways
+        if ligand_receptor_pairs: # If the specified pairs are non-empty (as we can always set them later)
+            
+            for i in range(num_pathways):
+
+                pathway_name = signalling_pathways[i] # Get the signalling pathway name
+                pairs = ligand_receptor_pairs[i] # Get the ligand-receptor pairs corresponding to thsi pathway
+
+                self.signalling_pathways[pathway_name] = pairs # Set the ligand-receptor pairs
+        
+        else: # If none have been specified, initialise a dictionary with empty values
+            
+            for pathway in signalling_pathways:
+
+                self.signalling_pathways[pathway] = [] # Just initialise an empty list
+
+        # Store the target genes if they have been specified
+        if upregulated_genes:
+
+            for i in range(num_pathways):
+
+                pathway_name = signalling_pathways[i] # Get the signalling pathway name
+                genes = upregulated_genes[i] # Get the upstream genes associated with the patywah
+
+                self.upregulated_genes[pathway_name] = genes # Set the genes
+
+        else: # Else we have to initialise empty lists for all of signalling pathways
+
+            for pathway in signalling_pathways:
+                self.upregulated_genes[pathway] = [] 
+
+        if downregulated_genes:
+
+                pathway_name = signalling_pathways[i] # Get the signalling pathway name
+                genes = downregulated_genes[i] # Get the upstream genes associated with the patywah
+
+                self.downregulated_genes[pathway_name] = genes # Set the genes
+
+        else: # Else we initialise empty lists
+
+            for pathway in signalling_pathways:
+
+                self.downregulated_genes[pathway] = []
+
+
+        self.individual_probabilities = {} # Initialise the individual probability matrices
+        self.aggregated_probabilities = {} # Initialise the aggregated probability matrices
+        self.normalised_aggregated_probabilities = {} # Initialise the normalised aggregated probability matrices
+        self.individual_networks = {} # Initialise the directed networks for the individual probability matrices
+        self.aggregated_networks = {} # Initialise the directed networks for the aggregated probability matrices
+        self.normalised_aggregated_networks = {} # Initialise the directed networks for the normalised aggregated probability matrices
+
+    def set_signalling_pathways(self, signalling_pathways, ligand_receptor_pairs):
         """
         Set the signalling pathways that we want to consider for the communication probabilities. 
         
         Parameters
         ----------
-        signalling_pathways (dict)
-        The relevant signalling pathways, where keys correspond to the signalling pathway names, e.g. Wnt,
-        and the values are lists of (ligand, receptor) tuples.
+        signalling_pathways (list)
+            The relevant signalling pathways, which form the keys for the dictionary that we 
+            store everything in.
+        ligand_receptor_pairs (list of lists)
+            The list of ligand-receptor pairs associated with each signalling pathway.
         """
-        self.signalling_pathways = signalling_pathways
+
+        num_pathways = len(signalling_pathways) # Get the number of signalling apthways
+
+        # Store each pathway name and its list of ligand-reeptor pairs
+        for i in range(num_pathways): 
+
+            pathway = signalling_pathways[i] # Get the pathway name
+            ligand_receptors = ligand_receptor_pairs[i] # Get the list of ligand-receptor pairs
+            self.signalling_pathways[pathway] = ligand_receptors
     
-    def set_downregulated_genes(self, upregulated_genes):
+    def set_upregulated_genes(self, signalling_pathways, upregulated_genes):
         """
         Set the target genes we know to be upregulated by the signalling pathways. 
 
         Parameters
         ----------
-        upregulated_genes (dict)
-        The upregulated genes targeted by each signalling pathway.
+        signalling_pathways (list)
+            The names of the signalling ways for which we want to store the upregulated gene list.
+        upregulated_genes (list)
+            The upregulated genes targeted by each signalling pathway.
         """
-        self.upregulated_genes = upregulated_genes
 
-    def set_downregulated_genes(self, downregulated_genes):
+        num_pathways = len(signalling_pathways) # Get the number of signalling apthways
+
+        # Store each pathway name and its list of upregulated genes, IF this list is non-empty
+        if upregulated_genes:
+
+            for i in range(num_pathways): 
+
+                pathway = signalling_pathways[i] # Get the pathway name
+                genes = upregulated_genes[i] # Get the list of ligand-receptor pairs
+                self.upregulated_genes[pathway] = genes
+
+        else: # This option allows us to clear the downstream genes
+
+            for pathway in signalling_pathways:
+
+                self.upregulated_genes[pathway] = []
+
+    def set_downregulated_genes(self, signalling_pathways, downregulated_genes):
         """
         Set the target genes we know to be downregulated by the signalling pathways. 
 
         Parameters
         ----------
-        downregulated_genes (dict)
-        The downregulated genes targeted by each signalling pathway.
-        """
-        self.downregulated_genes = downregulated_genes
-
-    def calculate_probability_matrix_for_ligand_receptor_pair(self, ligand_receptor_pair):
-        """
-        Calculates the individual probability matrix for a given ligand receptor pair
-        in a signalling pathway.
-
-        Parameters
-        ----------
-        ligand_receptor_pair (tuple)
-            The tuple of the ligand and receptor pair we are considering. 
-
-        Returns 
-        --------
-        An n_cells x n_cells sparse matrix, where n_cells is the number of cells.
+        signalling_pathways (list)
+            The names of the signalling ways for which we want to store the upregulated gene list.
+        downregulated_genes (list)
+            The downregulated genes targeted by each signalling pathway.
         """
 
-        # Get the gene expression data
-        gene_expression_data = self.data
+        num_pathways = len(signalling_pathways) # Get the number of signalling apthways
 
-        # Get the list of upregulated and downregulated target genes corresponding to the pair
-        upregulated_genes = get_upregulated_genes_for_ligand_receptor_pair(ligand_receptor_pair)
-        downregulated_genes = get_downregulated_genes_for_ligand_receptor_pair(ligand_receptor_pair)
+        # Only store the genes if there's a non-empty list of downstream genes
+        if downregulated_genes:
+            for i in range(num_pathways): 
 
-        # Call upon the method calculate_communication_probabilities, which calculates
-        # the probability matrix as per Wang et al. (2019)
-        return calculate_communication_probabilities(gene_expression_data, ligand_receptor_pair, upregulated_genes, downregulated_genes)
+                pathway = signalling_pathways[i] # Get the pathway name
+                genes = downregulated_genes[i] # Get the list of ligand-receptor pairs
+                self.downregulated_genes[pathway] = genes
 
-    def calculate_individual_probabilities_for_signalling_pathways(self, specified_pathways):
+        else: # We allow this option to clear the downstream genes
+            for pathway in signalling_pathways:
+                self.downregulated_genes[pathway] = []
+
+    def calculate_individual_probabilities(self, specified_pathways):
         """
         Calculates the individual probability matrices for each ligand-receptor pair specified
-        within the considered signalling pathways.
+        within the considered signalling pathways. These individual probabilities are then
+        stored in the soptsc attribute individual_probability_matrices
 
         Parameters
         ----------
         specified_pathways (list)
             The specified signalling pathway we want to consider. This should correspond
             to a key in the dictionary of signalling pathways set in the SoptSC object.
-
-        Returns
-        --------
-        A dictionary where the keys are the signalling pathway names and
-        the values are lists of n_cell x n_cell sparse matrices, that is,
-        the individual probability matrices calculated for each ligand-receptor pair
-        within the signalling pathway.
         """
 
-    def calculate_aggregated_probabilities_for_signalling_pathways(self, specified_pathways):
+        ann_data = self.data # Get the annotated data frame required for probability calculations
+
+        for pathway in specified_pathways:
+
+            ligand_receptor_pairs = self.signalling_pathways[pathway] # Get the list of ligand-receptor pairs
+            upregulated_genes = self.upregulated_genes[pathway] # Get the list of upregulated target genes
+            downregulated_genes = self.downregulated_genes[pathway] # Get the list of downregulated target genes
+
+            probability_matrices = calculate_communication_probabilities_list(ann_data, ligand_receptor_pairs, upregulated_genes, downregulated_genes)
+
+            # Store the list
+            self.individual_probabilities[pathway] = probability_matrices
+
+    def calculate_aggregated_probabilities(self, specified_pathways):
         """
         Calculates the aggregated probability matrices for each ligand-receptor pair within a 
         provided signalling pathway.
@@ -153,11 +247,111 @@ Class SoptSC:
             The specified signalling pathway we want to consider. This should correspond
             to a key in the dictionary of signalling pathways set in the SoptSC object.
 
-        Returns
-        --------
-        A dictionary where the keys are the signalling pathway names and
-        the values are the n_cell x n_cell sparse matrices, which, for now,
-        are taken as the average of the individual sparse matrices.
         """
+
+        for pathway in specified_pathways:
+
+            # If the individual probability matrices have been calculated, we only need to set the aggregated probabilities
+            if pathway in self.individual_probabilities: 
+
+                individual_probabilities = self.individual_probabilities[pathway] # Get the individual probability matrices (one for each ligand-receptor pair)
+                self.aggregated_probabilities[pathway] = calculate_aggregated_probability_matrix(individual_probabilities) # Calculate the aggregated probability from the list
     
+            else: # Else we need to calculate the individual probability matrices first
+
+                self.calculate_individual_probabilities([pathway]) # Calculate the individual probabilities
+
+                individual_probabilities = self.individual_probabilities[pathway] # Get the just-calculated matrices
+                self.aggregated_probabilities[pathway] = calculate_aggregated_probability_matrix(individual_probabilities) # Calculate the aggregated probability from the list
+
+    def calculate_normalised_aggregated_probabilities(self, specified_pathways):
+        """
+        Calculates the normalised aggregated probability matrices for each ligand-receptor pair within a 
+        provided signalling pathway.
+
+        Parameters
+        ----------
+        specified_pathways (list)
+            The specified signalling pathway we want to consider. This should correspond
+            to a key in the dictionary of signalling pathways set in the SoptSC object.
+
+        """
+
+        for pathway in specified_pathways:
+
+            # If the aggregated probability has already been calculated, we just normalise it.
+            if pathway in self.aggregated_probabilities: 
+
+                aggregated_probability = self.aggregated_probabilities[pathway] # Get the individual probability matrices (one for each ligand-receptor pair)
+                self.normalised_aggregated_probabilities[pathway] = normalise_aggregated_probabilities(aggregated_probability) # Calculate the aggregated probability from the list
+    
+            else: # Else we need to calculate the aggregated probability matrices first (and maybe the individual probability matrices too!)
+
+                self.calculate_aggregated_probabilities([pathway]) # Calculate the aggregated probabilities
+
+                aggregated_probability = self.aggregated_probabilities[pathway] # Get the just-calculated matrices
+                self.normalised_aggregated_probabilities[pathway] = normalise_aggregated_probabilities(aggregated_probability) # Calculate the aggregated probability from the list
+
+    def construct_individual_networks(self, specified_pathways, weight_label = 'probability'):
+        """
+        Constructs the corresponding directed networks for individual probability matrices
+        that have been calculated. These networks are stored in a similar fashion to the probabilities;
+        that is, in a dictionary where the keys are signalling pathway names and the items are the lists
+        of networks.
+
+        Parameters
+        ---------
+        specified_pathways (list)
+            The list of signalling pathways for which we want to construct the adjacency matrices. For now,
+            let's assume that we've already calculated the communication probability matrices.
+        weight_label (str)
+            The name of the edge weights, used when constructing the graph.
+        """
+
+        for pathway in specified_pathways:
+
+            individual_probabilities = self.individual_probabilities[pathway] # Get the list of probability matrices
+            self.individual_networks[pathway] = construct_network_list_from_probability_list(individual_probabilities, weight_label)
+
+    def construct_aggregated_networks(self, specified_pathways, weight_label = 'probability'):
+        """
+        Constructs the corresponding directed networks for aggregated probability matrices
+        that have been calculated. These networks are stored in a similar fashion to the probabilities;
+        that is, in a dictionary where the keys are signalling pathway names and the items are the lists
+        of networks.
+
+        Parameters
+        ---------
+        specified_pathways (list)
+            The list of signalling pathways for which we want to construct the adjacency matrices. For now,
+            let's assume that we've already calculated the communication probability matrices.
+        weight_label (str)
+            The name of the edge weights, used when constructing the graph.
+        """
+
+        for pathway in specified_pathways:
+
+            aggregated_probability = self.aggregated_probabilities[pathway] # Get the list of probability matrices
+            self.aggregated_networks[pathway] = construct_network_from_probability_matrix(aggregated_probability, weight_label)
+
+    def construct_normalised_aggregated_networks(self, specified_pathways, weight_label = 'probability'):
+        """
+        Constructs the corresponding directed networks for normalised probability matrices
+        that have been calculated. These networks are stored in a similar fashion to the probabilities;
+        that is, in a dictionary where the keys are signalling pathway names and the items are the lists
+        of networks.
+
+        Parameters
+        ---------
+        specified_pathways (list)
+            The list of signalling pathways for which we want to construct the adjacency matrices. For now,
+            let's assume that we've already calculated the communication probability matrices.
+        weight_label (str)
+            The name of the edge weights, used when constructing the graph.
+        """
+
+        for pathway in specified_pathways:
+
+            normalised_aggregated_probability = self.normalised_aggregated_probabilities[pathway] # Get the list of probability matrices
+            self.normalised_aggregated_networks[pathway] = construct_network_from_probability_matrix(normalised_aggregated_probability, weight_label)
 
