@@ -203,8 +203,13 @@ def calculate_communication_probabilities(ann_data, ligand_receptor_pair, upregu
         if (communication_probabilities[row_index, column_index] < 1e-6): # Truncate if the probability is too small. This factor is chosen to match the sparsity obtained in Wang et al. (2019)
             communication_probabilities[row_index, column_index] = 0.0
 
-            # Should probably re-normalise the communication probabilities!
-            communication_probabilities[row_index, :] /= communication_probabilities[row_index, :].sum() # Makes sure they sum to one.
+
+    # Should probably re-normalise the communication probabilities!
+
+    nonzero_row_indices = communication_probabilities.nonzero()[0] 
+    
+    for row in nonzero_row_indices:
+        communication_probabilities[row, :] /= communication_probabilities[row, :].sum() # Makes sure they sum to one.
 
     return communication_probabilities # Return the matrix
 
