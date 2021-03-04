@@ -5,8 +5,13 @@ n_obvs cell IDs, the n_vars gene IDs.
 """
 
 # Import the relevant methods
-from _probability import calculate_communication_probabilities_list, calculate_aggregated_probability_matrix, normalise_aggregated_probabilities # Methods to calculate the communication probabilities
-from _network import construct_network_from_probability_matrix, construct_network_list_from_probability_list # Methods to construct adjacency graphs
+from _probability import ( # Methods to calculate the communication probabilities
+    calculate_communication_probabilities_list, calculate_aggregated_probability_matrix, 
+    normalise_aggregated_probabilities, calculate_cluster_probability_matrix 
+)
+from _network import ( # Methods to construct adjacency graphs
+    construct_network_from_probability_matrix, construct_network_list_from_probability_list
+)
 
 class SoptSC:
     """
@@ -52,7 +57,7 @@ class SoptSC:
         to maek sure these are 
     """
 
-    def __init__(self, ann_data, signalling_pathways = {}, ligand_receptor_pairs = [], upregulated_genes = {}, downregulated_genes = {}):
+    def __init__(self, ann_data, signalling_pathways = None, ligand_receptor_pairs = None, upregulated_genes = None, downregulated_genes = None, cluster_label = None):
         """
         Initialise the SoptSC object.
         
@@ -79,12 +84,16 @@ class SoptSC:
         self.upregulated_genes = {} # Initialise the upregulated genes
         self.downregulated_genes = {} # Initialise the downregulated genes
 
+        if type(signalling_pathways) != list: # If we've only specified one pathway
+
+            signalling_pathways = [signalling_pathways]
+
         num_pathways = len(signalling_pathways)
 
         # Store the ligand receptor pairs with their corresponding pathways
         if ligand_receptor_pairs: # If the specified pairs are non-empty (as we can always set them later)
             
-            for i in range(num_pathways):
+             for i in range(num_pathways):
 
                 pathway_name = signalling_pathways[i] # Get the signalling pathway name
                 pairs = ligand_receptor_pairs[i] # Get the ligand-receptor pairs corresponding to thsi pathway
@@ -95,7 +104,7 @@ class SoptSC:
             
             for pathway in signalling_pathways:
 
-                self.signalling_pathways[pathway] = [] # Just initialise an empty list
+                self.signalling_pathways[pathway] = list() # Just initialise an empty list
 
         # Store the target genes if they have been specified
         if upregulated_genes:
@@ -110,9 +119,11 @@ class SoptSC:
         else: # Else we have to initialise empty lists for all of signalling pathways
 
             for pathway in signalling_pathways:
-                self.upregulated_genes[pathway] = [] 
+                self.upregulated_genes[pathway] = list() 
 
         if downregulated_genes:
+
+            for i in range(num_pathways):
 
                 pathway_name = signalling_pathways[i] # Get the signalling pathway name
                 genes = downregulated_genes[i] # Get the upstream genes associated with the patywah
@@ -123,15 +134,38 @@ class SoptSC:
 
             for pathway in signalling_pathways:
 
-                self.downregulated_genes[pathway] = []
+                self.downregulated_genes[pathway] = list()
 
 
         self.individual_probabilities = {} # Initialise the individual probability matrices
+        self.individual_cluster_probabilities = {} # Initialise the individual cluster-cluster probability matrices
         self.aggregated_probabilities = {} # Initialise the aggregated probability matrices
+        self.aggregated_cluster_probabilities = {} # Initialise the aggregated cluster-cluster probability matrices
         self.normalised_aggregated_probabilities = {} # Initialise the normalised aggregated probability matrices
         self.individual_networks = {} # Initialise the directed networks for the individual probability matrices
         self.aggregated_networks = {} # Initialise the directed networks for the aggregated probability matrices
         self.normalised_aggregated_networks = {} # Initialise the directed networks for the normalised aggregated probability matrices
+
+    @staticmethod
+    def check_and_convert_to_list(signalling_pathways):
+        """ 
+        Utility function to check if the considered pathway is a single pathway or al ist of pathways.
+        If it's former, we need to convert it to a list.
+        
+        Parameters
+        ---------
+        signalling_pathways (str or list)
+            The considered signalling pathways, either a sole pathway or a list of pathways.
+
+        Returns
+        --------
+        A list of signalling pathways, whether it's one or many.
+        """
+
+        if type(signalling_pathways) != list: # If we're only considering one signalling pathway
+            signalling_pathways = [signalling_pathways] # Listify it
+
+        return signalling_pathways
 
     def set_signalling_pathways(self, signalling_pathways, ligand_receptor_pairs):
         """
@@ -145,6 +179,8 @@ class SoptSC:
         ligand_receptor_pairs (list of lists)
             The list of ligand-receptor pairs associated with each signalling pathway.
         """
+
+        signalling_pathways = self.check_and_convert_to_list(signalling_pathways) # Listify it if need be
 
         num_pathways = len(signalling_pathways) # Get the number of signalling apthways
 
@@ -166,6 +202,8 @@ class SoptSC:
         upregulated_genes (list)
             The upregulated genes targeted by each signalling pathway.
         """
+
+        signalling_pathways = self.check_and_convert_to_list(signalling_pathways) # Listify it if need be
 
         num_pathways = len(signalling_pathways) # Get the number of signalling apthways
 
@@ -196,6 +234,8 @@ class SoptSC:
             The downregulated genes targeted by each signalling pathway.
         """
 
+        signalling_pathways = self.check_and_convert_to_list(signalling_pathways) # Listify it if need be
+
         num_pathways = len(signalling_pathways) # Get the number of signalling apthways
 
         # Only store the genes if there's a non-empty list of downstream genes
@@ -210,7 +250,7 @@ class SoptSC:
             for pathway in signalling_pathways:
                 self.downregulated_genes[pathway] = []
 
-    def calculate_individual_probabilities(self, specified_pathways):
+    def calculate_individual_probabilities(self, specified_pathways, mean_type = 'Arithmetic', verbose = False):
         """
         Calculates the individual probability matrices for each ligand-receptor pair specified
         within the considered signalling pathways. These individual probabilities are then
@@ -221,11 +261,21 @@ class SoptSC:
         specified_pathways (list)
             The specified signalling pathway we want to consider. This should correspond
             to a key in the dictionary of signalling pathways set in the SoptSC object.
+        mean_type (str)
+            Specifies whether or not we consider Arithmetic or Geometric means for the
+            ligand/receptor expressions.
+        verbose (boolean)
+            Whether or not we print the considered pathways during calculations.
         """
 
         ann_data = self.data # Get the annotated data frame required for probability calculations
 
+        specified_pathways = self.check_and_convert_to_list(specified_pathways) # Listify it if need be
+
         for pathway in specified_pathways:
+
+            if verbose: # Display the considered pathway
+                print('Calculating individual probabilities for ' + pathway)
 
             ligand_receptor_pairs = self.signalling_pathways[pathway] # Get the list of ligand-receptor pairs
             upregulated_genes = self.upregulated_genes[pathway] # Get the list of upregulated target genes
@@ -236,7 +286,46 @@ class SoptSC:
             # Store the list
             self.individual_probabilities[pathway] = probability_matrices
 
-    def calculate_aggregated_probabilities(self, specified_pathways):
+    def calculate_individual_cluster_probabilities(self, cluster_label, specified_pathways, verbose = False):
+        """
+        Calculates the cluster-clusterprobability matrices for each ligand-receptor pair specified
+        within the considered signalling pathways. These individual probabilities are then
+        stored in the soptsc attribute individual_cluster_probabilities
+
+        Parameters
+        ----------
+        cluster_label (string)
+            The specified column name for the cluster labels. This assumes that the clusters 
+            can be accessed via self.cell_ids[cluster_label].
+        specified_pathways (list)
+            The specified signalling pathway we want to consider. This should correspond
+            to a key in the dictionary of signalling pathways set in the SoptSC object.
+        mean_type (str)
+            Specifies whether or not we consider Arithmetic or Geometric means for the
+            ligand/receptor expressions.
+        verbose (boolean)
+            Whether or not we print the considered pathways during calculations.
+        """
+
+        ann_data = self.data # Get the annotated data frame required for probability calculations
+
+        if self.individual_probabilities:
+            individual_probabilities = self.individual_probabilities # Listify it if need be
+
+        else:
+            print('Please run calculate_individual_probabilities first')
+
+        for pathway in specified_pathways:
+
+            if verbose: # Display the considered pathway
+                print('Calculating cluster-cluster probabilities for ' + pathway)
+
+            cluster_probabilities = [calculate_cluster_probability_matrix(ann_data, probability, cluster_label) for probability in individual_probabilities[pathway]]
+
+            # Store the list
+            self.individual_cluster_probabilities[pathway] = cluster_probabilities
+
+    def calculate_aggregated_probabilities(self, specified_pathways, verbose = False):
         """
         Calculates the aggregated probability matrices for each ligand-receptor pair within a 
         provided signalling pathway.
@@ -249,7 +338,12 @@ class SoptSC:
 
         """
 
+        specified_pathways = self.check_and_convert_to_list(specified_pathways) # Listify it if need be
+
         for pathway in specified_pathways:
+
+            if verbose: # Display the considered pathway
+                print('Calculating aggregated probabilities for ' + pathway)
 
             # If the individual probability matrices have been calculated, we only need to set the aggregated probabilities
             if pathway in self.individual_probabilities: 
@@ -264,9 +358,9 @@ class SoptSC:
                 individual_probabilities = self.individual_probabilities[pathway] # Get the just-calculated matrices
                 self.aggregated_probabilities[pathway] = calculate_aggregated_probability_matrix(individual_probabilities) # Calculate the aggregated probability from the list
 
-    def calculate_normalised_aggregated_probabilities(self, specified_pathways):
+    def calculate_aggregated_cluster_probabilities(self, cluster_label, specified_pathways, verbose = False):
         """
-        Calculates the normalised aggregated probability matrices for each ligand-receptor pair within a 
+        Calculates the aggregated probability matrices for each ligand-receptor pair within a 
         provided signalling pathway.
 
         Parameters
@@ -277,7 +371,46 @@ class SoptSC:
 
         """
 
+        ann_data = self.data # Get the annotated data frame required for probability calculations
+
+        if self.aggregated_probabilities:
+            aggregated_probabilities = self.aggregated_probabilities # Listify it if need be
+
+        else:
+            print('Please run calculate_aggregated_probabilities first')
+
         for pathway in specified_pathways:
+
+            if verbose: # Display the considered pathway
+                print('Calculating cluster-cluster probabilities for ' + pathway)
+
+            probability_matrix = aggregated_probabilities[pathway]
+            print(probability_matrix.shape)
+
+            cluster_probabilities = calculate_cluster_probability_matrix(ann_data, probability_matrix, cluster_label)
+
+            # Store the probability matrix
+            self.aggregated_cluster_probabilities[pathway] = cluster_probabilities
+
+    def calculate_normalised_aggregated_probabilities(self, specified_pathways, verbose = False):
+        """
+        Calculates the normalised aggregated probability matrices for each ligand-receptor pair within a 
+        provided signalling pathway.
+
+        Parameters
+        ----------
+        specified_pathways (str or list)
+            The specified signalling pathway we want to consider. This should correspond
+            to a key in the dictionary of signalling pathways set in the SoptSC object.
+
+        """
+
+        specified_pathways = self.check_and_convert_to_list(specified_pathways) # Listify it if need be
+
+        for pathway in specified_pathways:
+
+            if verbose:
+                print('Calculating normalised aggregated probabilities for ' + pathway)
 
             # If the aggregated probability has already been calculated, we just normalise it.
             if pathway in self.aggregated_probabilities: 
@@ -287,7 +420,7 @@ class SoptSC:
     
             else: # Else we need to calculate the aggregated probability matrices first (and maybe the individual probability matrices too!)
 
-                self.calculate_aggregated_probabilities([pathway]) # Calculate the aggregated probabilities
+                self.calculate_aggregated_probabilities(pathway) # Calculate the aggregated probabilities
 
                 aggregated_probability = self.aggregated_probabilities[pathway] # Get the just-calculated matrices
                 self.normalised_aggregated_probabilities[pathway] = normalise_aggregated_probabilities(aggregated_probability) # Calculate the aggregated probability from the list
@@ -307,6 +440,8 @@ class SoptSC:
         weight_label (str)
             The name of the edge weights, used when constructing the graph.
         """
+
+        specified_pathways = self.check_and_convert_to_list(specified_pathways) # Listify it if need be
 
         for pathway in specified_pathways:
 
@@ -329,6 +464,8 @@ class SoptSC:
             The name of the edge weights, used when constructing the graph.
         """
 
+        specified_pathways = self.check_and_convert_to_list(specified_pathways) # Listify it if need be
+
         for pathway in specified_pathways:
 
             aggregated_probability = self.aggregated_probabilities[pathway] # Get the list of probability matrices
@@ -349,6 +486,8 @@ class SoptSC:
         weight_label (str)
             The name of the edge weights, used when constructing the graph.
         """
+        
+        specified_pathways = self.check_and_convert_to_list(specified_pathways) # Listify it if need be
 
         for pathway in specified_pathways:
 

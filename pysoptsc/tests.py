@@ -35,10 +35,8 @@ joost_soptsc.set_signalling_pathways(pathway_names, ligand_receptor_pairs) # Set
 joost_soptsc.set_upregulated_genes(pathway_names, upregulated_genes)
 joost_soptsc.set_downregulated_genes(pathway_names, [])
 
-print(vars(joost_soptsc))
-
 # Calculate the probabilities now for a single pathway
-joost_soptsc.calculate_individual_probabilities(['Tgfb'])
+joost_soptsc.calculate_individual_probabilities(pathway_names, verbose=True)
 
 # # Calculate the aggregated probabilities for the other pathways time, I want to see if it also calculates the individual matrices properly
 # joost_soptsc.calculate_aggregated_probabilities(['Tgfb', 'Wnt', 'Bmp'])

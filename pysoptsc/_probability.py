@@ -5,9 +5,95 @@ from Wang et al. (2020).
 
 import numpy as np
 import pandas as pd
+import itertools as it
 from scipy.sparse import csr_matrix
 
-def calculate_communication_probabilities(ann_data, ligand_receptor_pair, upregulated_genes = [], downregulated_genes = []):
+def get_expression_matrix(ann_data, gene):
+    """ Method to obtain the resulting gene expressions for specified genes
+
+    Parameters
+    ----------
+    ann_data (annotated data frame)
+        The annotated data matrix, which contains many of the attributes we will use to calculate the
+        communication probabilities.
+    genes (string)
+        The gene for which we want the (normalised to 1) expressions.
+
+    Returns
+    -------
+    gene_expressions (sparse matrix)
+        An n_cell x n_gene expression matrix.
+    """
+
+    num_cells = ann_data.n_obs # Get the number of cells
+    gene_index = ann_data.var_names.get_loc(gene) # Get the location of the gene in the matrix (column index)
+
+    gene_expressions = csr_matrix(ann_data.X[:, gene_index]).transpose() # Expression corresponds to the relevant column of the matrix
+
+    if np.max(gene_expressions) != 0.0:
+        gene_expressions /= gene_expressions.max()
+
+    return gene_expressions.reshape((num_cells, 1))
+
+def get_mean_expression(ann_data, genes, mean = 'Arithmetic'):
+    """ Method to obtain the resulting gene expressions for specified genes
+
+    Parameters
+    ----------
+    ann_data (annotated data frame)
+        The annotated data matrix, which contains many of the attributes we will use to calculate the
+        communication probabilities.
+    genes (list of strings)
+        The list of genes for which we want the (normalised to 1) expressions.
+    mean (string)
+        The type of mean we will calculate. Should be either the Arithmetic or Geometric mean.
+
+    Returns
+    -------
+    mean_expressions (sparse matrix)
+        An n_cell x n_gene expression matrix.
+    """
+
+    # Make sure that the specified mean is correct
+    if mean not in ['Arithmetic', 'Geometric']:
+        raise ValueError('Specified mean type must be either Arithmetic or Geometric.')
+
+    num_cells = ann_data.n_obs # Get the number of cells
+
+    if type(genes) != list: # If we have only specified one gene, turn this into a list to make things easier.
+        genes = [genes]
+
+    num_genes = len(genes) # Get the number of genes
+
+    # Initialise the mean expression vector
+    mean_expressions = np.zeros((num_cells, 1))
+
+    if mean == 'Arithmetic':
+
+        mean_expressions = csr_matrix((num_cells, 1)) # Initialise the vector of zeros
+
+        for gene in genes:
+
+            gene_expressions = get_expression_matrix(ann_data, gene) # Get the corresponding gene expression vector
+
+            mean_expressions += gene_expressions # Update the mean expressions
+
+        return mean_expressions / num_genes # Divide by the number of genes
+
+    else: # Should be geometric
+
+        mean_expressions = csr_matrix(np.ones((num_cells, 1))) # Initialise the vector (should be all ones for products)
+
+        for gene in genes:
+
+            gene_expressions = get_expression_matrix(ann_data, gene) # Get the corresponding gene expression vector
+
+            mean_expressions *= gene_expressions # Update the mean expressions
+
+        return mean_expressions**(1.0 / num_genes) # Take the n_genes root
+
+def calculate_communication_probabilities(ann_data, ligand_expressions, receptor_expressions,\
+                                            upregulated_gene_expressions = None, downregulated_gene_expressions = None):
     """ 
     Method to calculate the cell-cell communication probabilities for a given ligand-receptor pair.
 
@@ -16,12 +102,14 @@ def calculate_communication_probabilities(ann_data, ligand_receptor_pair, upregu
     ann_data (annotated data frame)
         The annotated data matrix, which contains many of the attributes we will use to calculate the
         communication probabilities.
-    ligand_receptor_pair (string tuple)
-        The ligand-receptor pair, in that order.
-    upregulated_genes (list of strings)
+    ligand_expressions (sparse n_cell x 1 matrix)
+        The normalised vector of ligand expressions that we will consider
+    receptor_expressions (sparse n_cell x 1 matrix)
+        The normalised vector of receptor expressions that we will consider.
+    upregulated_gene_expressions (sparse n_cell x 1 matrix)
         The list of downstream genes we believe to be upregulated by the ligand-receptor pair,
         if there are any specified.
-    downregulated_genes (list of strings)
+    downregulated_gene_expressions (sparse n_cell x 1 matrix)
         The list of downstream genes we believe to be downregulated by the ligand-receptor pair,
         if there are any specified.
     Returns
@@ -31,189 +119,57 @@ def calculate_communication_probabilities(ann_data, ligand_receptor_pair, upregu
         with cell j.
     """
 
-    # Get the raw gene expression data
-    gene_expression_data = ann_data.X 
-
     # The number of cells corresponds to the number of rows
     num_cells = ann_data.n_obs # First dimension corresponds to rows
     
     # Initialise the communication matrix
-    communication_probabilities = csr_matrix((num_cells, num_cells))
+    communication_probabilities = np.zeros((num_cells, num_cells))
 
-    # We need to find which column corresponds to the ligand and receptor, respectively.
-    # NB One caveat of this method currently is we're assuming that the names of the ligands, receptors
-    # genes all are in the same format as what they are stored in the annotated data. That is, they're
-    # either all in capitals, or only the first character is capitalised. We should probably introduce
-    # something to catch this in the long term.
+    # Calculate the matrix for ligand-receptor interactions
+    ligand_diag = np.diag(ligand_expressions.flatten()) # Diagonal matrix with the ligand expressions
+    receptor_matrix = np.tile(receptor_expressions.transpose(), (num_cells, 1)) # Matrix with receptor values as the rows
 
-    gene_ids = ann_data.var_names # Get the list of gene IDs
+    communication_probabilities = np.exp( - 1.0 * (np.dot(ligand_diag, receptor_matrix) + 1e-12)**(-1.0)) # Fudge factor of 1e-12 so we don't divide by zero
 
-    ligand = ligand_receptor_pair[0] # Get the name of the ligand
-    ligand_column_index = gene_ids.get_loc(ligand) # Find where this ligand occurs along the columns of the matrix 
-    ligand_expression_data = gene_expression_data[:, ligand_column_index] # Returns n_cell x 1 sparse matrix of ligand expression levels
+    # If the upregulated gene matrix has been specified, calculate the means in each column
+    if upregulated_gene_expressions is not None:
 
-    receptor = ligand_receptor_pair[1] # Get the name of the receptor
-    receptor_column_index = gene_ids.get_loc(receptor) # Find the column index that corresponds to this receptor
-    receptor_expression_data = gene_expression_data[:, receptor_column_index] # Returns n_cell x 1 sparse matrix of receptor expression levels\
+        # Calculate the quantificaiton of the upregulated downstream genes
+        beta = np.exp(-1.0 * (upregulated_gene_expressions + 1e-12)**(-1.0) )
 
-    # We only proceed with the probability calculations if BOTH the ligand and receptor gene expressions are non-zero for a positive number of cells.
-    # This is based on the underlying assumptions of the method from Wang et al. (2019)
-    nonzero_ligand_indices = np.nonzero(ligand_expression_data)[0] # Get the array of non-zero indices for ligand expressions
-    nonzero_receptor_indices = np.nonzero(receptor_expression_data)[0] # Get the array of non-zero indices for receptor expressions
+        # Calculate the scaling of alpha due to beta
+        beta_matrix = np.tile(beta.transpose(), (num_cells, 1))
+        Kappa = np.dot(communication_probabilities, (communication_probabilities + beta_matrix + 1e-12)**(-1.0) ) # Fudge factors to avoid division by zero
 
-    # Before proceeding, we will construct the target gene matrices, as described in Wang et al. (2019), if they have been specified
-    if upregulated_genes:
+        upstream_scaling = np.multiply(Kappa, beta_matrix) # This ensures that the values of beta multiply with the columns of Kappa
 
-        num_upregulated_genes = len(upregulated_genes) # Number of upregulated target genes specified
-
-        upregulated_gene_expressions = csr_matrix((num_cells, num_upregulated_genes)) # Initialise sparse matrix
-
-        # Fill the matrices with the gene expressions
-        for i in range(num_upregulated_genes):
-
-            gene = upregulated_genes[i] # Get the target gene ID
-
-            if gene in gene_ids: # If there is expression data for this gene
-
-                gene_column_index = gene_ids.get_loc(gene)
-                gene_expression_levels = gene_expression_data[:, gene_column_index]
-                gene_expression_levels = csr_matrix(gene_expression_levels).transpose() # This makes sure we're assigning a vector of the correct size
-
-                if (gene_expression_levels.max() != 0.0): # Only fill the matrix if there's a non-zero gene expression
-
-                    upregulated_gene_expressions[:, i] = gene_expression_levels / gene_expression_levels.max() # Normalise the expression
-
-        # Take the column means to get the mean target gene expressions for each cell
-        mean_upregulated_gene_expressions = upregulated_gene_expressions.mean(1)
+        communication_probabilities = np.multiply(communication_probabilities, upstream_scaling) # Multiply the probabilities element-wise by the scaling
 
     # Construct the target gene matrix of downregulated genes, if specified.
-    if downregulated_genes:
+    if downregulated_gene_expressions is not None:
 
-        num_downregulated_genes = len(downregulated_genes) # Number of downregulated target genes
+        # Calculate the quantification of hte upregulated downstream genes
+        gamma = np.exp(-1.0 * downregulated_gene_expressions)
 
-        downregulated_gene_expressions = csr_matrix((num_cells, num_downregulated_genes))
+        # Calculate the scaling of alpha due to gamma
+        gamma_matrix = np.tile(gamma.transpose(), (num_cells, 1))
+        Lambda = np.dot(communication_probabilities, (communication_probabilities + gamma_matrix + 1e-12)**(-1.0) ) # Fudge factors to avoid division by zero
 
-        # Fill the matrices with the gene expressions
-        for i in range(num_downregulated_genes):
+        downstream_scaling = np.multiply(Lambda, gamma_matrix) # This makes sure the values of gamma multiplies with the columns of Lambda
 
-            gene = downregulated_genes[i] # Get the target gene ID
+        communication_probabilities = np.multiply(communication_probabilities, downstream_scaling) # Multiply the probabilities element-wise by the scaling
 
-            if gene in gene_ids: # If there is expression data for this gene
+    # Truncate probabilities that are too small
+    communication_probabilities[communication_probabilities < 1e-6] = 0.0
 
-                gene_column_index = gene_ids.get_loc(gene)
-                gene_expression_levels = gene_expression_data[:, gene_column_index]
-                gene_expression_levels = csr_matrix(gene_expression_levels).transpose() # This makes sure we're assigning a vector of the correct size
+    # We now divide each non-zero row by the sums
+    nonzero_rows = communication_probabilities.nonzero()[0]
 
-                if (gene_expression_levels.max() != 0.0): # Only fill the matrix if there's a non-zero gene expression
+    communication_probabilities[nonzero_rows, :] /= communication_probabilities[nonzero_rows, :].sum(axis=1, keepdims=True) 
 
-                    downregulated_gene_expressions[:, i] = gene_expression_levels / gene_expression_levels.max() # Normalise the expression
+    return csr_matrix(communication_probabilities) # Return the matrix
 
-        # Take the column means to get the average target gene expression for each cell
-        mean_downregulated_gene_expressions = downregulated_gene_expressions.mean(1)
-
-    # If both the ligand and receptor expressions have a positive maximum
-    if ( (np.max(ligand_expression_data) != 0.0) & (np.max(receptor_expression_data != 0.0)) ):
-        ligand_expression_data /= np.max(ligand_expression_data) # Normalise so the maximum ligand expression level is 1.0
-        receptor_expression_data /= np.max(receptor_expression_data) # Normalise so the maximum receptor expression level is 1.0
-
-        # Based on the method from Wang et al. (2019), we need only consider the indices where both the ligand and receptor expressions are non-zero.
-        # Let us go through the non-zero ligand and receptor indices, until we find a better method.
-        for ligand_index in nonzero_ligand_indices: # This corresponds to the row index
-
-            nonzero_column_indices = [] # To maintain sparsity, we'll only normalise at the places of non-zero probabilities
-            for receptor_index in nonzero_receptor_indices: # This corresponds to the column indices
-
-                ligand_expression = ligand_expression_data[ligand_index] # The second index needs to be specified because the expression data's an n_cell x 1 matrix (weird, I know)
-                receptor_expression = receptor_expression_data[receptor_index] # Similar deal as above, but for the receptor expressions
-
-                if (ligand_expression != 0.0)&(receptor_expression != 0.0): # We need both to be non-zero to have a non-zero probability
-                    
-                    alpha = np.exp(- 1.0 / (ligand_expression * receptor_expression)) # Calculate the ligand-receptor interaction probability
-
-                    # If any upregulated target genes have been specified, we need to adjust the probability based on their expression levels
-                    if upregulated_genes: # If not empty
-
-                        # Get the mean upregated gene expression for the receptor cell
-                        mean_upregulated_gene_expression = mean_upregulated_gene_expressions[receptor_index, 0] # Index this way as the mean values is an n x 1 matrix
-
-                        # We take the exponential of the average gene expression
-                        # and calculate the weighting coefficient that adjusts the probability according to
-                        # the average upregulated gene expression level
-
-                        if (mean_upregulated_gene_expression != 0.0):
-
-                            beta = np.exp( - 1.0 / mean_upregulated_gene_expression) # Quantifies the average expression of upregulated downstream genes
-                            Kappa = alpha / (alpha + beta) # Adjusts the original ligand-receptor probability by the average expression
-
-                        else:
-
-                            beta = 0.0
-                            Kappa = 0.0
-
-                    else: # If we don't have any information on the upregulated genes, we don't adjust the communication probability
-                        
-                        beta = 1.0 
-                        Kappa = 1.0
-
-                    Kappa = alpha / (alpha + beta) # Calculate the weighting coefficient that adjusts the ligand-receptor interaction by the upregulated gene expressions
-
-                    # If any downregulated target genes have been specified, we need to adjust the probability based on their expression levels
-                    if downregulated_genes: #If not empty
-
-                        mean_downregulated_gene_expression = mean_downregulated_gene_expressions[receptor_index, 0] # Get the mean gene expression for the receptor cell
-
-                        # We take the exponential of the average gene expression
-                        # and calculate the weighting coefficient that adjusts the probability according to
-                        # the average downregulated gene expression level
-                        gamma = np.exp( - mean_downregulated_gene_expression) # Quantifies the average expression of downregulated downstream genes
-                        Lambda = alpha / (alpha + gamma) # Adjusts the original ligand-receptor probability by the average expression
-
-                    else: # If we don't have any information on the downregulated genes, we don't adjust the communication probability
-                        
-                        gamma = 1.0 
-                        Lambda = 1.0
-
-                    # Calculate the cell-cell probability (un-normalised), as per Wang et al. (2019)
-                    calculated_probability = alpha * beta * gamma * Kappa * Lambda 
-
-                    # If the probability is non-zero, we add this to the list of column indices we'll need to normalise over
-                    if (calculated_probability != 0.0):
-
-                        nonzero_column_indices.append(receptor_index)
-                        communication_probabilities[ligand_index, receptor_index] = calculated_probability # Update the probability matrix
-
-            if (communication_probabilities[ligand_index, :].sum() != 0.0): # Normalise the row if we have non-zero probabilities
-
-                for receptor_index in nonzero_receptor_indices: # Only normalise at the non-zero entries
-
-                    communication_probabilities[ligand_index, receptor_index] /= communication_probabilities[ligand_index, :].sum() # Normalise the probabilities so that they sum across the row to be one.
-
-    # Normalise the matrix to make sure the probabilities are all a max of 1.
-    communication_probabilities /= communication_probabilities.max()
-
-    # As this was done in the original code, we truncate all normalised probabilities below 1e-6, as suggested by Shuxiong to filter out low-level interactions
-    nonzero_indices = communication_probabilities.nonzero()
-    nonzero_row_indices = nonzero_indices[0]
-    nonzero_column_indices = nonzero_indices[1]
-
-    for i in range(len(nonzero_row_indices)):
-        row_index = nonzero_row_indices[i]
-        column_index = nonzero_column_indices[i]
-
-        if (communication_probabilities[row_index, column_index] < 1e-6): # Truncate if the probability is too small. This factor is chosen to match the sparsity obtained in Wang et al. (2019)
-            communication_probabilities[row_index, column_index] = 0.0
-
-
-    # Should probably re-normalise the communication probabilities!
-
-    nonzero_row_indices = communication_probabilities.nonzero()[0] 
-    
-    for row in nonzero_row_indices:
-        communication_probabilities[row, :] /= communication_probabilities[row, :].sum() # Makes sure they sum to one.
-
-    return communication_probabilities # Return the matrix
-
-def calculate_communication_probabilities_list(ann_data, ligand_receptor_pairs, upregulated_genes = [], downregulated_genes = []):
+def calculate_communication_probabilities_list(ann_data, ligand_receptor_pairs, upregulated_genes = [], downregulated_genes = [], mean = 'Arithmetic'):
     """ 
     Method to calculate the individual probabilities for each ligand-receptor pair
     within a signalling pathway.
@@ -231,6 +187,9 @@ def calculate_communication_probabilities_list(ann_data, ligand_receptor_pairs, 
     downregulated_genes (list of strings)
         The list of downstream genes we believe to be downregulated by the ligand-receptor pair,
         if there are any specified.
+    mean ('Arithmetic' or 'Geometric)
+        Specifies how we calculate the mean ligand or mean receptor expression.
+
     Returns
     ------
     communication_probabilities (list)
@@ -238,8 +197,40 @@ def calculate_communication_probabilities_list(ann_data, ligand_receptor_pairs, 
         with cell j for a ligand-receptor pair.
     """
 
+    # Construct the mean ligand expressions
+    ligands = [pair[0] for pair in ligand_receptor_pairs]
+    receptors = [pair[1] for pair in ligand_receptor_pairs]
+
+    mean_ligand_expressions = [get_mean_expression(ann_data, ligand, mean) for ligand in ligands]
+    
+    # Construct the mean receptor expressions
+    mean_receptor_expressions = [get_mean_expression(ann_data, receptor, mean) for receptor in receptors]
+
+    # Initialise the downstream gene matrices, so that we can pass them into the function later
+    upregulated_gene_expressions = None
+    downregulated_gene_expressions = None
+
+    # If downstream genes have been specified, we should get these matrices too
+    if upregulated_genes:
+        upregulated_gene_expressions = get_mean_expression(ann_data, upregulated_genes).toarray() # Default should be arithmetic mean
+
+    if downregulated_genes:
+        downregulated_gene_expressions = get_mean_expression(ann_data, downregulated_genes).toarray() # Default should be arithmetic mean
+
+    individual_probabilities = []
+
     # Calculate the communication probabilities for each ligand-receptor pair
-    individual_probabilities = [calculate_communication_probabilities(ann_data, pair, upregulated_genes, downregulated_genes) for pair in ligand_receptor_pairs]
+    num_pairs = len(ligand_receptor_pairs)
+
+    for index in range(num_pairs):
+
+        # Calculate the corresponding probability matrix
+        ligands = mean_ligand_expressions[index].toarray()
+        receptors = mean_receptor_expressions[index].toarray() 
+        individual_probabilities.append(calculate_communication_probabilities(ann_data,\
+                                                                            ligands, receptors,\
+                                                                            upregulated_gene_expressions,\
+                                                                            downregulated_gene_expressions))
         
     return individual_probabilities
 
@@ -297,7 +288,60 @@ def normalise_aggregated_probabilities(aggregated_probability_matrix):
 
     nonzero_rows = nonzero_indices[0] # Non-zero row indices
 
-    for row in nonzero_rows: # Sweep by rows
-        normalised_aggregated_probability_matrix[row, :] /= normalised_aggregated_probability_matrix[row, :].sum() # Normalise and we done here
+    normalised_aggregated_probability_matrix[nonzero_rows, :] /= normalised_aggregated_probability_matrix[nonzero_rows, :].sum(axis=1, keepdims=True) 
 
     return normalised_aggregated_probability_matrix
+
+def calculate_cluster_probability_matrix(ann_data, probability_matrix, cluster_label):
+    """
+    Method to calculate the cluster-cluster probability matrix for a given ligand-receptor pair.
+
+    Parameters
+    ----------
+    ann_data (annotated dataframe)
+        The annotated dataframe that stores information like the cell names, gene IDs, cluster labels, etc.
+    individual_probability_matrix (sparse matrix)
+        The n_cell x n_cell communication probability matrix P_{ij}, describing the probability that
+        cell i communicates with cell j. This could apply to either an individual ligand-receptor pair
+        or to the aggregated probability matrix.
+    cluster_label (string)
+        The name of the cluster label sthat we want to consider.
+    Returns
+    --------
+    cluster_probability_matrix (dense matrix)
+        The n_cluster x n_cluster communication probability matrix P_{AB}, describing the probability that
+        cluster A communicates with cluster B via the specified ligand-receptor pair.
+    """
+    cell_clusters = ann_data.obs[cluster_label] # Get the clusters for each cell label
+    cluster_labels = list(cell_clusters.unique()) # Get the unique list of clusters
+    num_clusters = len(cluster_labels)
+
+    cluster_pairs = {(i, j):1 for i, j in it.product(range(num_clusters), range(num_clusters))} # It's faster to construct the pairs like this
+
+    cluster_probability_matrix = np.zeros((num_clusters, num_clusters))
+
+    # The general assumption is that there shouldn't be too many clusters, so I think we can just do a nested for loop
+    # (we can speed this up if we need to via itertools and dictionaries.)
+    for pair in cluster_pairs:
+
+        # Get the clusters
+        A, B = pair
+        cluster_A = cluster_labels[A]
+        cluster_B = cluster_labels[B]
+
+        # Get the indices corresponding to each cluster
+        cells_A = np.where(cell_clusters == cluster_A)[0]
+        cells_B = np.where(cell_clusters == cluster_B)[0]
+
+        # Get the possible porbabilities
+        probabilities_A_B = np.array([probability_matrix[i, j] for i, j in it.product(cells_A, cells_B)]) # It's faster to construct the pairs like this
+
+        cluster_probability_matrix[A, B] += probabilities_A_B.sum()
+
+    # We now divide each non-zero row by the sums (to avoid 0/0)
+    nonzero_rows = cluster_probability_matrix.nonzero()[0]
+
+    if len(nonzero_rows) > 0:
+        cluster_probability_matrix[nonzero_rows, :] /= cluster_probability_matrix[nonzero_rows, :].sum(axis=1, keepdims=True) 
+
+    return cluster_probability_matrix
